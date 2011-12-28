@@ -80,7 +80,7 @@ namespace Enyim.Caching.Memcached
 					if (this.isDisposed) return false;
 
 					// try to connect to the server
-					using (var socket = this.CreateSocket()) ;
+					using (var socket = this.CreateSocket()) {}
 
 					if (this.internalPoolImpl.IsAlive)
 						return true;
@@ -164,7 +164,7 @@ namespace Enyim.Caching.Memcached
 			this.Dispose();
 		}
 
-		#region [ InternalPoolImpl             ]
+		#region [ InternalPoolImpl			 ]
 
 		private class InternalPoolImpl : IDisposable
 		{
@@ -206,7 +206,7 @@ namespace Enyim.Caching.Memcached
 				if (this.config.ConnectionTimeout < TimeSpan.Zero)
 					throw new InvalidOperationException("connectionTimeout must be >= TimeSpan.Zero", null);
 
-				this.semaphore = new Semaphore(minItems, maxItems);
+				this.semaphore = new Semaphore(maxItems, maxItems);
 				this.freeItems = new InterlockedQueue<PooledSocket>();
 			}
 
@@ -294,7 +294,7 @@ namespace Enyim.Caching.Memcached
 				// do we have free items?
 				if (this.freeItems.Dequeue(out retval))
 				{
-					#region [ get it from the pool         ]
+					#region [ get it from the pool		 ]
 
 					try
 					{
@@ -439,7 +439,7 @@ namespace Enyim.Caching.Memcached
 		}
 
 		#endregion
-		#region [ Comparer                     ]
+		#region [ Comparer					 ]
 		internal sealed class Comparer : IEqualityComparer<IMemcachedNode>
 		{
 			public static readonly Comparer Instance = new Comparer();
@@ -484,7 +484,7 @@ namespace Enyim.Caching.Memcached
 			}
 		}
 
-		#region [ IMemcachedNode               ]
+		#region [ IMemcachedNode			   ]
 
 		IPEndPoint IMemcachedNode.EndPoint
 		{
@@ -506,15 +506,86 @@ namespace Enyim.Caching.Memcached
 			return this.ExecuteOperation(op);
 		}
 
-		//IAsyncResult IMemcachedNode.BeginExecute(IOperation op, AsyncCallback callback, object state)
-		//{
-		//    throw new NotImplementedException();
-		//}
+		IAsyncResult IMemcachedNode.BeginExecute(IOperation operation, AsyncCallback callback, object state)
+		{
+			if (!(operation is IAsyncOperation))
+			{
+				throw new ArgumentException(string.Format("IOperation type '{0}' does not implement '{1}'", operation.GetType(), typeof(IAsyncOperation)), "op");
+			}
 
-		//bool IMemcachedNode.EndExecute(IAsyncResult result)
-		//{
-		//    throw new NotImplementedException();
-		//}
+			var aop = (IAsyncOperation) operation;
+
+			var ps = this.Acquire();
+
+			var asyncResult = new AsyncResult<bool>(state);
+
+			if (ps == null)
+			{
+				asyncResult.SetComplete(false);
+				return asyncResult;
+			}
+
+			AsyncCallback readCallback =
+				callbackResult =>
+					{
+						var success = true;
+						try
+						{
+							using (ps)
+							{
+								aop.EndReadResponse(callbackResult);
+							}
+						}
+						catch (Exception e)
+						{
+							log.Error(e.Message, e);
+							success = false;
+						}
+
+						asyncResult.SetComplete(success);
+
+						if (callback != null)
+						{
+							callback(asyncResult);
+						}
+					};
+
+			AsyncCallback writeCallback =
+				callbackResult =>
+					{
+						try
+						{
+							ps.EndWrite(callbackResult);
+						}
+						catch (Exception e)
+						{
+							log.Error(e.Message, e);
+							using (ps)
+							{
+							}
+
+							asyncResult.SetComplete(false);
+
+							if (callback != null)
+							{
+								callback(asyncResult);
+							}
+
+							return;
+						}
+
+						aop.BeginReadResponse(ps, readCallback, null);
+					};
+
+			ps.BeginWrite(aop.GetBuffer(), writeCallback, null);
+
+			return asyncResult;
+		}
+
+		bool IMemcachedNode.EndExecute(IAsyncResult result)
+		{
+			return ((AsyncResult<bool>) result).Result;
+		}
 
 		event Action<IMemcachedNode> IMemcachedNode.Failed
 		{
@@ -523,6 +594,45 @@ namespace Enyim.Caching.Memcached
 		}
 
 		#endregion
+	}
+
+	class AsyncResult<T> : IAsyncResult
+	{
+		private readonly ManualResetEvent signal = new ManualResetEvent(false);
+		private readonly object asyncState;
+
+		public AsyncResult(object asyncState)
+		{
+			this.asyncState = asyncState;
+		}
+
+		public bool IsCompleted
+		{
+			get { return signal.WaitOne(0); }
+		}
+
+		public WaitHandle AsyncWaitHandle
+		{
+			get { return signal; }
+		}
+
+		public object AsyncState
+		{
+			get { return asyncState; }
+		}
+
+		public bool CompletedSynchronously
+		{
+			get { return false; }
+		}
+
+		internal void SetComplete(T result)
+		{
+			this.Result = result;
+			signal.Set();
+		}
+
+		internal T Result { get; private set; }
 	}
 }
 

@@ -4,7 +4,7 @@ using System.Collections.Generic;
 
 namespace Enyim.Caching.Memcached.Protocol.Binary
 {
-	public class MultiGetOperation : BinaryMultiItemOperation, IMultiGetOperation
+	public class MultiGetOperation : BinaryMultiItemOperation, IMultiGetOperation, IAsyncOperation
 	{
 		private static readonly Enyim.Caching.ILog log = Enyim.Caching.LogManager.GetLogger(typeof(MultiGetOperation));
 
@@ -24,7 +24,7 @@ namespace Enyim.Caching.Memcached.Protocol.Binary
 			return request;
 		}
 
-		protected internal override IList<ArraySegment<byte>> GetBuffer()
+		IList<ArraySegment<byte>> IAsyncOperation.GetBuffer()
 		{
 			var keys = this.Keys;
 
@@ -77,27 +77,100 @@ namespace Enyim.Caching.Memcached.Protocol.Binary
 				if (response.CorrelationId == this.noopId)
 					return true;
 
-				string key;
-
-				// find the key to the response
-				if (!this.idToKey.TryGetValue(response.CorrelationId, out key))
-				{
-					// we're not supposed to get here tho
-					log.WarnFormat("Found response with CorrelationId {0}, but no key is matching it.", response.CorrelationId);
-					continue;
-				}
-
-				if (log.IsDebugEnabled) log.DebugFormat("Reading item {0}", key);
-
-				// deserialize the response
-				int flags = BinaryConverter.DecodeInt32(response.Extra, 0);
-
-				this.result[key] = new CacheItem((ushort)flags, response.Data);
-				this.Cas[key] = response.CAS;
+				ProcessResponse(response);
 			}
 
 			// finished reading but we did not find the NOOP
 			return false;
+		}
+
+		class AsyncState
+		{
+			public AsyncResult<bool> AsyncResult { get; set; }
+			public AsyncCallback Callback { get; set; }
+			public PooledSocket Socket { get; set; }
+			public BinaryResponse Response { get; set; }
+		}
+
+		IAsyncResult IAsyncOperation.BeginReadResponse(PooledSocket socket, AsyncCallback callback, object state)
+		{
+			log.Debug("MultiGetOperation.BeginReadResponse");
+
+			var asyncResult = new AsyncResult<bool>(state);
+
+			this.result = new Dictionary<string, CacheItem>();
+			this.Cas = new Dictionary<string, ulong>();
+
+			var response = new BinaryResponse();
+
+			response.BeginRead(socket, EndReadPart, new AsyncState { AsyncResult = asyncResult, Callback = callback, Socket = socket, Response = response });
+
+			return asyncResult;
+		}
+
+		private void EndReadPart(IAsyncResult ar)
+		{
+			var success = false;
+
+			var state = (AsyncState)ar.AsyncState;
+
+			try
+			{
+				
+				if (!state.Response.EndRead(ar) || state.Response.CorrelationId == this.noopId)
+				{
+					log.Debug("MultiGetOperation.EndReadPart: no more responses to read.");
+
+					success = state.Response.CorrelationId == this.noopId;
+				}
+				else
+				{
+					log.Debug("MultiGetOperation.EndReadPart: read next response.");
+					ProcessResponse(state.Response);
+
+					state.Response.BeginRead(state.Socket, EndReadPart, state);
+					return;
+				}			  
+			}
+			catch (Exception e)
+			{
+				log.Error(e.Message, e);
+				success = false;
+			}
+
+			state.AsyncResult.SetComplete(success);
+
+			if (state.Callback != null)
+			{
+				state.Callback(state.AsyncResult);
+			}
+		}
+
+		bool IAsyncOperation.EndReadResponse(IAsyncResult ar)
+		{
+			log.Debug("MultiGetOperation.EndReadResponse: " + ((AsyncResult<bool>)ar).Result);
+			return ((AsyncResult<bool>) ar).Result;
+		}
+
+		private void ProcessResponse(BinaryResponse response)
+		{
+			string key;
+
+			// find the key to the response
+			if (!this.idToKey.TryGetValue(response.CorrelationId, out key))
+			{
+				// we're not supposed to get here tho
+				log.WarnFormat("Found response with CorrelationId {0}, but no key is matching it.", response.CorrelationId);
+				return;
+			}
+
+			if (log.IsDebugEnabled) log.DebugFormat("Reading item {0}", key);
+
+			// deserialize the response
+			int flags = BinaryConverter.DecodeInt32(response.Extra, 0);
+
+			this.result[key] = new CacheItem((ushort)flags, response.Data);
+			this.Cas[key] = response.CAS;
 		}
 
 		public Dictionary<string, CacheItem> Result

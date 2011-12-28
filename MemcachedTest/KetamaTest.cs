@@ -3321,15 +3321,15 @@ namespace MemcachedTest
 			return true;
 		}
 
-		//IAsyncResult IMemcachedNode.BeginExecute(IOperation op, AsyncCallback callback, object state)
-		//{
-		//    throw new NotImplementedException();
-		//}
+		IAsyncResult IMemcachedNode.BeginExecute(IOperation op, AsyncCallback callback, object state)
+		{
+		    throw new NotImplementedException();
+		}
 
-		//bool IMemcachedNode.EndExecute(IAsyncResult result)
-		//{
-		//    throw new NotImplementedException();
-		//}
+		bool IMemcachedNode.EndExecute(IAsyncResult result)
+		{
+		    throw new NotImplementedException();
+		}
 
 		#endregion
 

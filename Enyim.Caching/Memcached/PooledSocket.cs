@@ -266,39 +266,95 @@ namespace Enyim.Caching.Memcached
 			}
 		}
 
-		//public IAsyncResult BeginRead(byte[] buffer, int offset, int size, AsyncCallback callback, object state)
-		//{
-		//    this.inputStream.BEG
-		//    return null;
+		public IAsyncResult BeginRead(byte[] buffer, int offset, int size, AsyncCallback callback, object state)
+		{
+			if (size <= 0)
+			{
+				throw new ArgumentException("must be greater than zero", "size");
+			}
+			var helper = new AsyncSocketReader(this.inputStream, buffer, offset, size, callback, state);
 
-		//    //return this.socket.BeginReceive(buffer, offset, size, callback, state);
+			return helper.BeginRead();
+		}
 
-		//    //            this.CheckDisposed();
+		public void EndRead(IAsyncResult ar)
+		{
+			var x = (AsyncResult<Exception>) ar;
+			if (x.Result != null)
+			{
+				throw new IOException("Exception in async handler", x.Result);
+			}
+		}
 
-		//    //int read = 0;
-		//    //int shouldRead = count;
+		class AsyncSocketReader
+		{
+			private readonly Stream stream;
+			private readonly byte[] buffer;
+			private readonly int initialOffset;
+			private readonly int size;
+			private readonly AsyncCallback callback;
+			private readonly object state;
 
-		//    //while (read < count)
-		//    //{
-		//    //    try
-		//    //    {
-		//    //        int currentRead = this.inputStream.Read(buffer, offset, shouldRead);
-		//    //        if (currentRead < 1)
-		//    //            continue;
+			private int remaining;
+			private int cumulativeOffset;
+			private int totalBytesRead;
 
-		//    //        read += currentRead;
-		//    //        offset += currentRead;
-		//    //        shouldRead -= currentRead;
-		//    //    }
-		//    //    catch (IOException)
-		//    //    {
-		//    //        this.isAlive = false;
-		//    //        throw;
-		//    //    }
-		//    //}
+			public AsyncSocketReader(Stream stream, byte[] buffer, int offset, int size, AsyncCallback callback, object state)
+			{
+				this.stream = stream;
+				this.buffer = buffer;
+				this.initialOffset = offset;
+				this.size = size;
+				this.callback = callback;
+				this.state = state;
+			}
 
-		//}
+			public IAsyncResult BeginRead()
+			{
+				var asyncResult = new AsyncResult<Exception>(state);
 
+				totalBytesRead = 0;
+				cumulativeOffset = initialOffset;
+				remaining = size;
+
+				stream.BeginRead(buffer, cumulativeOffset, remaining, ContinueRead, asyncResult);
+				
+				return asyncResult;
+			}
+
+			private void ContinueRead(IAsyncResult callbackResult)
+			{
+				var asyncResult = (AsyncResult<Exception>)callbackResult.AsyncState;
+
+				try
+				{
+					var bytesRead = stream.EndRead(callbackResult);
+					if (bytesRead > 0)
+					{
+						totalBytesRead += bytesRead;
+						cumulativeOffset += bytesRead;
+						remaining -= bytesRead;
+					}
+
+					if (remaining > 0)
+					{
+						stream.BeginRead(buffer, cumulativeOffset, remaining, ContinueRead, asyncResult);
+						return;
+					}
+
+					asyncResult.SetComplete(null);
+				}
+				catch (IOException e)
+				{
+					asyncResult.SetComplete(e);
+				}
+					
+				if (callback != null)
+				{
+					callback(asyncResult);
+				}
+			}
+		}
 
 		#region [ BasicNetworkStream           ]
 		private class BasicNetworkStream : Stream

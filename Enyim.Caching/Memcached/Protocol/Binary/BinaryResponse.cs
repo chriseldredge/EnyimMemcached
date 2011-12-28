@@ -38,16 +38,103 @@ namespace Enyim.Caching.Memcached.Protocol.Binary
 						?? (this.responseMessage = Encoding.ASCII.GetString(this.Data.Array, this.Data.Offset, this.Data.Count)));
 		}
 
-		public unsafe bool Read(PooledSocket socket)
+		public bool Read(PooledSocket socket)
 		{
 			if (!socket.IsAlive)
 			{
 				this.StatusCode = -1;
 				return false;
 			}
-
-			byte[] header = new byte[24];
+			
+			var header = new byte[24];
 			socket.Read(header, 0, 24);
+
+			var data = DecodeHeader(header);
+
+			socket.Read(data, 0, data.Length);
+
+			return this.StatusCode == 0;
+		}
+
+		public IAsyncResult BeginRead(PooledSocket socket, AsyncCallback callback, object state)
+		{
+			var asyncResult = new AsyncResult<bool>(state);
+
+			if (!socket.IsAlive)
+			{
+				this.StatusCode = -1;
+				asyncResult.SetComplete(false);
+				return asyncResult;
+			}
+
+			var header = new byte[24];
+
+			AsyncCallback endReadContent =
+				callbackResult =>
+					{
+						try
+						{
+							socket.EndRead(callbackResult);
+
+							asyncResult.SetComplete(this.StatusCode == 0);
+						}
+						catch (Exception e)
+						{
+							log.Error(e.Message, e);
+							asyncResult.SetComplete(false);
+						}
+
+						if (callback != null)
+						{
+							callback(asyncResult);
+						}
+					};
+
+			AsyncCallback endReadHeader =
+				ar =>
+					{
+						try
+						{
+							socket.EndRead(ar);
+
+							var data = DecodeHeader(header);
+
+							if (data.Length > 0)
+							{
+								log.Debug("BinaryResponse.BeginRead.endReadHeader: read " + data.Length + " more bytes.");
+
+								socket.BeginRead(data, 0, data.Length, endReadContent, null);
+
+								return;
+							}
+
+							asyncResult.SetComplete(true);
+						}
+						catch (Exception e)
+						{
+							log.Error("BinaryResponse.BeginRead.endReadHeader", e);
+							asyncResult.SetComplete(false);
+						}
+						if (callback != null)
+						{
+							callback(asyncResult);
+						}
+
+					};
+
+			log.Debug("BinaryResponse.BeginRead: read header.");
+			socket.BeginRead(header, 0, 24, endReadHeader, null);
+
+			return asyncResult;
+		}
+
+		public bool EndRead(IAsyncResult ar)
+		{
+			return this.StatusCode == 0;
+		}
+
+		private unsafe byte[] DecodeHeader(byte[] header)
+		{
 #if DEBUG_PROTOCOL
 			if (log.IsDebugEnabled)
 			{
@@ -72,15 +159,6 @@ namespace Enyim.Caching.Memcached.Protocol.Binary
 				if (buffer[0] != MAGIC_VALUE)
 					throw new InvalidOperationException("Expected magic value " + MAGIC_VALUE + ", received: " + buffer[0]);
 
-				int remaining = BinaryConverter.DecodeInt32(buffer, HEADER_BODY);
-				int extraLength = buffer[HEADER_EXTRA];
-
-				byte[] data = new byte[remaining];
-				socket.Read(data, 0, remaining);
-
-				this.Extra = new ArraySegment<byte>(data, 0, extraLength);
-				this.Data = new ArraySegment<byte>(data, extraLength, data.Length - extraLength);
-
 				this.DataType = buffer[HEADER_DATATYPE];
 				this.Opcode = buffer[HEADER_OPCODE];
 				this.StatusCode = BinaryConverter.DecodeInt16(buffer, HEADER_STATUS);
@@ -88,14 +166,21 @@ namespace Enyim.Caching.Memcached.Protocol.Binary
 				this.KeyLength = BinaryConverter.DecodeInt16(buffer, HEADER_KEY);
 				this.CorrelationId = BinaryConverter.DecodeInt32(buffer, HEADER_OPAQUE);
 				this.CAS = BinaryConverter.DecodeUInt64(buffer, HEADER_CAS);
-			}
 
-			return this.StatusCode == 0;
+				int remaining = BinaryConverter.DecodeInt32(buffer, HEADER_BODY);
+				int extraLength = buffer[HEADER_EXTRA];
+
+				var data = new byte[remaining];
+
+				this.Extra = new ArraySegment<byte>(data, 0, extraLength);
+				this.Data = new ArraySegment<byte>(data, extraLength, data.Length - extraLength);
+
+				return data;
+			}
 		}
 	}
-}
 
-#region [ License information          ]
+#region [ License information		  ]
 /* ************************************************************
  * 
  *    Copyright (c) 2010 Attila Kiskó, enyim.com

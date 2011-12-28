@@ -723,6 +723,13 @@ namespace Enyim.Caching
 			});
 		}
 
+		class AsyncMultiGetState
+		{
+			public IMultiGetOperation Operation { get; set; }
+			public IMemcachedNode Node { get; set; }
+			public IEnumerable<string> RequestedKeys { get; set; }
+		}
+
 		public IDictionary<string, T> PerformMultiGet<T>(IEnumerable<string> keys, Func<IMultiGetOperation, KeyValuePair<string, CacheItem>, T> collector)
 		{
 			// transform the keys and index them by hashed => original
@@ -731,7 +738,7 @@ namespace Enyim.Caching
 			var byServer = hashed.Keys.ToLookup(key => this.pool.Locate(key));
 
 			var retval = new Dictionary<string, T>(hashed.Count);
-			var handles = new List<WaitHandle>();
+			var handles = new List<IAsyncResult>();
 
 			//execute each list of keys on their respective node
 			foreach (var slice in byServer)
@@ -744,67 +751,51 @@ namespace Enyim.Caching
 				var nodeKeys = slice.ToArray();
 				var mget = this.pool.OperationFactory.MultiGet(nodeKeys);
 
-				// we'll use the delegate's BeginInvoke/EndInvoke to run the gets parallel
-				var action = new Func<IOperation, bool>(node.Execute);
-				var mre = new ManualResetEvent(false);
-				handles.Add(mre);
-
-				//execute the mgets in parallel
-				action.BeginInvoke(mget, iar =>
-				{
-					try
-					{
-						using (iar.AsyncWaitHandle)
-							if (action.EndInvoke(iar))
-							{
-								if (this.performanceMonitor != null)
-								{
-									// full list of keys sent to the server
-									var expectedKeys = (string[])iar.AsyncState;
-									var expectedCount = expectedKeys.Length;
-
-									// number of items returned
-									var resultCount = mget.Result.Count;
-
-									// log the results
-									this.performanceMonitor.Get(resultCount, true);
-
-									// log the missing keys
-									if (resultCount != expectedCount)
-										this.performanceMonitor.Get(expectedCount - resultCount, true);
-								}
-
-								// deserialize the items in the dictionary
-								foreach (var kvp in mget.Result)
-								{
-									string original;
-									if (hashed.TryGetValue(kvp.Key, out original))
-									{
-										var result = collector(mget, kvp);
-
-										// the lock will serialize the merge,
-										// but at least the commands were not waiting on each other
-										lock (retval) retval[original] = result;
-									}
-								}
-							}
-					}
-					catch (Exception e)
-					{
-						log.Error(e);
-					}
-					finally
-					{
-						// indicate that we finished processing
-						mre.Set();
-					}
-				}, nodeKeys);
+				var asyncResult = node.BeginExecute(mget, null, new AsyncMultiGetState{Node = node, Operation = mget, RequestedKeys = nodeKeys});
+                
+				handles.Add(asyncResult);
 			}
 
 			// wait for all nodes to finish
 			if (handles.Count > 0)
 			{
-				SafeWaitAllAndDispose(handles.ToArray());
+
+				SafeWaitAllAndDispose(handles.Select(h => h.AsyncWaitHandle).ToArray());
+			}
+
+			foreach (var ar in handles)
+			{
+				var st = (AsyncMultiGetState) ar.AsyncState;
+				if (!st.Node.EndExecute(ar)) continue;
+
+				if (this.performanceMonitor != null)
+				{
+					// full list of keys sent to the server
+					var expectedKeys = st.RequestedKeys;
+					var expectedCount = expectedKeys.Count();
+
+					// number of items returned
+					var resultCount = st.Operation.Result.Count;
+
+					// log the results
+					this.performanceMonitor.Get(resultCount, true);
+
+					// log the missing keys
+					if (resultCount != expectedCount)
+						this.performanceMonitor.Get(expectedCount - resultCount, true);
+				}
+
+				// deserialize the items in the dictionary
+				foreach (var kvp in st.Operation.Result)
+				{
+					string original;
+					if (hashed.TryGetValue(kvp.Key, out original))
+					{
+						var result = collector(st.Operation, kvp);
+
+						retval[original] = result;
+					}
+				}
 			}
 
 			return retval;
@@ -821,13 +812,13 @@ namespace Enyim.Caching
 				if (Thread.CurrentThread.GetApartmentState() == ApartmentState.MTA)
 					WaitHandle.WaitAll(waitHandles);
 				else
-					for (var i = 0; i < waitHandles.Length; i++)
-						waitHandles[i].WaitOne();
+					foreach (WaitHandle t in waitHandles)
+					    t.WaitOne();
 			}
 			finally
 			{
-				for (var i = 0; i < waitHandles.Length; i++)
-					waitHandles[i].Close();
+				foreach (WaitHandle t in waitHandles)
+				    t.Close();
 			}
 		}
 

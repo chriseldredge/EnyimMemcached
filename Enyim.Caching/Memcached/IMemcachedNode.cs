@@ -15,8 +15,8 @@ namespace Enyim.Caching.Memcached
 
 		event Action<IMemcachedNode> Failed;
 
-		//IAsyncResult BeginExecute(IOperation op, AsyncCallback callback, object state);
-		//bool EndExecute(IAsyncResult result);
+		IAsyncResult BeginExecute(IOperation op, AsyncCallback callback, object state);
+		bool EndExecute(IAsyncResult result);
 	}
 }
 
